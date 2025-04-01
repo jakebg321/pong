@@ -1,12 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
+import io from 'socket.io-client';
+import { SERVER_URL } from '../config';
 
-const LocalPongGame = () => {
+const PongGame = ({ mode = 'local' }) => {
   const canvasRef = useRef(null);
   const requestRef = useRef();
   const previousTimeRef = useRef();
+  const socketRef = useRef(null);
   const [debugInfo, setDebugInfo] = useState({});
   
   const [gameStarted, setGameStarted] = useState(false);
+  const [isWaiting, setIsWaiting] = useState(false);
+  const [playerNumber, setPlayerNumber] = useState(null);
+  const [gameId, setGameId] = useState(null);
+  
   const gameStateRef = useRef({
     ball: {
       x: 400,
@@ -23,7 +30,7 @@ const LocalPongGame = () => {
       dy: 0,
       speed: 8
     },
-    computer: {
+    opponent: {
       x: 740,
       y: 250,
       width: 10,
@@ -31,7 +38,7 @@ const LocalPongGame = () => {
     },
     score: {
       player: 0,
-      computer: 0
+      opponent: 0
     },
     canvas: {
       width: 800,
@@ -39,31 +46,94 @@ const LocalPongGame = () => {
     }
   });
 
+  // Initialize socket connection for multiplayer
+  useEffect(() => {
+    if (mode === 'multiplayer') {
+      console.log('Connecting to server:', SERVER_URL);
+      socketRef.current = io(SERVER_URL, {
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+      });
+      
+      socketRef.current.on('connect', () => {
+        console.log('Connected to server');
+      });
+
+      socketRef.current.on('connect_error', (error) => {
+        console.error('Connection error:', error);
+        // You might want to show this to the user
+        setDebugInfo(prev => ({
+          ...prev,
+          connectionError: `Connection error: ${error.message}`
+        }));
+      });
+      
+      socketRef.current.on('waiting', () => {
+        console.log('Waiting for opponent...');
+        setIsWaiting(true);
+      });
+      
+      socketRef.current.on('matchFound', ({ gameId, playerNumber }) => {
+        console.log(`Match found! Game ID: ${gameId}, Player: ${playerNumber}`);
+        setGameId(gameId);
+        setPlayerNumber(playerNumber);
+        setIsWaiting(false);
+        setGameStarted(true);
+      });
+      
+      socketRef.current.on('gameState', (state) => {
+        // Update local game state with server state
+        gameStateRef.current = {
+          ...gameStateRef.current,
+          ball: state.ball,
+          player: {
+            ...gameStateRef.current.player,
+            y: playerNumber === 1 ? state.paddles.player1.y : state.paddles.player2.y
+          },
+          opponent: {
+            ...gameStateRef.current.opponent,
+            y: playerNumber === 1 ? state.paddles.player2.y : state.paddles.player1.y
+          },
+          score: {
+            player: playerNumber === 1 ? state.score.player1 : state.score.player2,
+            opponent: playerNumber === 1 ? state.score.player2 : state.score.player1
+          }
+        };
+      });
+      
+      socketRef.current.on('opponentLeft', () => {
+        console.log('Opponent left the game');
+        setGameStarted(false);
+        setGameId(null);
+        setPlayerNumber(null);
+      });
+      
+      return () => {
+        if (socketRef.current) {
+          console.log('Disconnecting from server');
+          socketRef.current.disconnect();
+        }
+      };
+    }
+  }, [mode]);
+
   // Handle keyboard controls
   useEffect(() => {
-    console.log("[KEYBOARD] Setting up keyboard event listeners");
-    
     const handleKeyDown = (e) => {
-      // Don't handle keys if game hasn't started
       if (!gameStarted) return;
       
-      console.log(`[KEYBOARD] Key pressed: ${e.key}`);
-      
-      // Prevent default browser behavior for game controls
       if (['w', 's', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
         e.preventDefault();
         
-        switch(e.key) {
-          case 'w':
-          case 'ArrowUp':
-            console.log("[KEYBOARD] Moving paddle UP");
-            gameStateRef.current.player.dy = -gameStateRef.current.player.speed;
-            break;
-          case 's':
-          case 'ArrowDown':
-            console.log("[KEYBOARD] Moving paddle DOWN");
-            gameStateRef.current.player.dy = gameStateRef.current.player.speed;
-            break;
+        const direction = ['w', 'ArrowUp'].includes(e.key) ? 'up' : 'down';
+        const speed = direction === 'up' ? -gameStateRef.current.player.speed : gameStateRef.current.player.speed;
+        
+        if (mode === 'multiplayer') {
+          socketRef.current.emit('paddleMove', { gameId, direction });
+        } else {
+          gameStateRef.current.player.dy = speed;
         }
       }
     };
@@ -73,11 +143,12 @@ const LocalPongGame = () => {
       
       if (['w', 's', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
         e.preventDefault();
-        gameStateRef.current.player.dy = 0;
+        if (mode === 'local') {
+          gameStateRef.current.player.dy = 0;
+        }
       }
     };
 
-    // Add event listeners to window instead of canvas to ensure they always work
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
@@ -85,10 +156,12 @@ const LocalPongGame = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [gameStarted]);
+  }, [gameStarted, mode, gameId]);
 
-  // Update game state
+  // Update game state (local mode only)
   const updateGameState = () => {
+    if (mode === 'multiplayer') return; // Server handles state updates in multiplayer
+    
     const state = gameStateRef.current;
     
     // Update ball position
@@ -118,12 +191,12 @@ const LocalPongGame = () => {
       state.ball.dy += (Math.random() * 2 - 1);
     }
     
-    // Ball collision with computer paddle
+    // Ball collision with opponent paddle
     if (
-      state.ball.x + state.ball.radius > state.computer.x &&
-      state.ball.x + state.ball.radius < state.computer.x + state.computer.width &&
-      state.ball.y > state.computer.y &&
-      state.ball.y < state.computer.y + state.computer.height
+      state.ball.x + state.ball.radius > state.opponent.x &&
+      state.ball.x + state.ball.radius < state.opponent.x + state.opponent.width &&
+      state.ball.y > state.opponent.y &&
+      state.ball.y < state.opponent.y + state.opponent.height
     ) {
       state.ball.dx = -Math.abs(state.ball.dx);
       state.ball.dy += (Math.random() * 2 - 1);
@@ -135,9 +208,9 @@ const LocalPongGame = () => {
       resetBall();
     }
     
-    // Computer scores
+    // Opponent scores
     if (state.ball.x < 0) {
-      state.score.computer += 1;
+      state.score.opponent += 1;
       resetBall();
     }
     
@@ -152,8 +225,10 @@ const LocalPongGame = () => {
     });
   };
 
-  // Reset ball after scoring
+  // Reset ball after scoring (local mode only)
   const resetBall = () => {
+    if (mode === 'multiplayer') return;
+    
     const state = gameStateRef.current;
     state.ball.x = state.canvas.width / 2;
     state.ball.y = state.canvas.height / 2;
@@ -167,7 +242,7 @@ const LocalPongGame = () => {
       previousTimeRef.current = time;
     }
 
-    if (gameStarted) {
+    if (gameStarted && mode === 'local') {
       updateGameState();
     }
     
@@ -213,10 +288,10 @@ const LocalPongGame = () => {
       state.player.height
     );
     ctx.fillRect(
-      state.computer.x, 
-      state.computer.y, 
-      state.computer.width, 
-      state.computer.height
+      state.opponent.x, 
+      state.opponent.y, 
+      state.opponent.width, 
+      state.opponent.height
     );
     
     // Draw ball
@@ -235,26 +310,51 @@ const LocalPongGame = () => {
     // Draw score
     ctx.font = '48px Arial';
     ctx.fillText(state.score.player, canvas.width / 4, 50);
-    ctx.fillText(state.score.computer, 3 * canvas.width / 4, 50);
+    ctx.fillText(state.score.opponent, 3 * canvas.width / 4, 50);
   };
 
   // Start the game
   const startGame = () => {
-    console.log("[GAME] Starting game!");
-    setGameStarted(true);
+    if (mode === 'multiplayer') {
+      socketRef.current.emit('findMatch');
+    } else {
+      setGameStarted(true);
+    }
+  };
+
+  // Cancel matchmaking
+  const cancelMatchmaking = () => {
+    if (mode === 'multiplayer' && !gameStarted) {
+      socketRef.current.emit('cancelMatch');
+      setIsWaiting(false);
+    }
   };
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-dark-bg text-text-primary">
-      <h1 className="text-4xl font-fira mb-6 text-matrix-green">Local Pong Game</h1>
+      <h1 className="text-4xl font-fira mb-6 text-matrix-green">
+        {mode === 'multiplayer' ? 'Multiplayer' : 'Local'} Pong Game
+      </h1>
       
-      {!gameStarted && (
+      {!gameStarted && !isWaiting && (
         <div className="mb-6">
           <button
             className="px-6 py-3 bg-matrix-green text-black font-bold rounded hover:bg-opacity-80 transition"
             onClick={startGame}
           >
-            Start Game
+            {mode === 'multiplayer' ? 'Find Match' : 'Start Game'}
+          </button>
+        </div>
+      )}
+      
+      {isWaiting && (
+        <div className="mb-6">
+          <p className="text-matrix-green mb-4">Waiting for opponent...</p>
+          <button
+            className="px-6 py-3 bg-red-500 text-white font-bold rounded hover:bg-opacity-80 transition"
+            onClick={cancelMatchmaking}
+          >
+            Cancel
           </button>
         </div>
       )}
@@ -267,10 +367,16 @@ const LocalPongGame = () => {
       />
       
       <div className="mt-4 text-white">
-        <p>{gameStarted 
-          ? "Use W/S or ↑/↓ arrow keys to move your paddle" 
-          : "Click Start Game to begin"}</p>
-        <p className="mt-2">Computer opponent will remain stationary</p>
+        <p>
+          {gameStarted 
+            ? "Use W/S or ↑/↓ arrow keys to move your paddle" 
+            : mode === 'multiplayer' 
+              ? "Click Find Match to play against another player"
+              : "Click Start Game to begin"}
+        </p>
+        {mode === 'local' && (
+          <p className="mt-2">Computer opponent will remain stationary</p>
+        )}
       </div>
       
       {/* Debug Info Panel */}
@@ -278,6 +384,17 @@ const LocalPongGame = () => {
         <h3 className="text-matrix-cyan font-bold mb-2">Debug Info</h3>
         <div className="text-sm font-mono">
           <p>Game Started: {debugInfo.gameStarted ? "Yes" : "No"}</p>
+          <p>Mode: {mode}</p>
+          <p>Server: {SERVER_URL}</p>
+          {debugInfo.connectionError && (
+            <p className="text-red-500">{debugInfo.connectionError}</p>
+          )}
+          {mode === 'multiplayer' && (
+            <>
+              <p>Player Number: {playerNumber || 'N/A'}</p>
+              <p>Game ID: {gameId || 'N/A'}</p>
+            </>
+          )}
           <p>Player Y: {debugInfo.playerY}</p>
           <p>Player Direction: {debugInfo.playerDY}</p>
           <p>Ball Position: ({debugInfo.ballX}, {debugInfo.ballY})</p>
@@ -288,4 +405,4 @@ const LocalPongGame = () => {
   );
 };
 
-export default LocalPongGame;
+export default PongGame;

@@ -1,0 +1,9 @@
+# Build Command (to be used in Render's Build Command field):
+cd pong && npm install && npm run build
+
+# Start Command (to be used in Render's Start Command field):
+cd pong && npm start
+
+# Note: The cd pong is necessary because Render clones your repository into a directory,
+# and we need to ensure we're in the correct directory before running the commands.
+# npm start will run the production server (server.cjs) which also serves the built static files. 
