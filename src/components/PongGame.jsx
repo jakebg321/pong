@@ -35,6 +35,11 @@ const PongGame = () => {
     }
   });
 
+  // Add prediction state
+  const [predictedState, setPredictedState] = useState(null);
+  const lastUpdateTime = useRef(Date.now());
+  const pendingMoves = useRef([]);
+
   // Connect to socket server
   useEffect(() => {
     console.log('Initializing socket connection...');
@@ -91,64 +96,88 @@ const PongGame = () => {
     };
   }, []);
 
-  // Handle keyboard controls
+  // Handle keyboard controls with prediction
   useEffect(() => {
-    if (!socket || gameStatus !== 'playing') {
-      console.log('Keyboard controls not active:', { 
-        socket: !!socket, 
-        gameStatus,
-        socketConnected: socket?.connected 
-      });
-      return;
-    }
+    if (!socket || gameStatus !== 'playing') return;
 
     const handleKeyDown = (e) => {
-      if (!gameId) {
-        console.log('No game ID available');
-        return;
-      }
-
-      // Only handle game controls if we're in a game
+      if (!gameId) return;
       if (gameStatus !== 'playing') return;
 
-      // Prevent default behavior for game controls
       if (e.key === 'w' || e.key === 's' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
       }
 
-      console.log('Key pressed:', e.key);
-      console.log('Current game state:', {
-        gameId,
-        playerNumber,
-        gameStatus
-      });
+      const direction = (e.key === 'w' || e.key === 'ArrowUp') ? 'up' : 'down';
+      const move = {
+        direction,
+        timestamp: Date.now()
+      };
 
-      switch(e.key) {
-        case 'w':
-        case 'ArrowUp':
-          console.log('Sending paddle move up for game:', gameId);
-          socket.emit('paddleMove', { gameId, direction: 'up' });
-          break;
-        case 's':
-        case 'ArrowDown':
-          console.log('Sending paddle move down for game:', gameId);
-          socket.emit('paddleMove', { gameId, direction: 'down' });
-          break;
-        default:
-          break;
-      }
+      // Add to pending moves
+      pendingMoves.current.push(move);
+
+      // Update local prediction immediately
+      const paddle = playerNumber === 1 ? 'player1' : 'player2';
+      const newState = { ...gameState };
+      const paddleSpeed = 15;
+      const deltaY = direction === 'up' ? -paddleSpeed : paddleSpeed;
+      
+      newState.paddles[paddle].y = Math.max(
+        0,
+        Math.min(CANVAS_HEIGHT - newState.paddles[paddle].height,
+          newState.paddles[paddle].y + deltaY)
+      );
+
+      setPredictedState(newState);
+      socket.emit('paddleMove', { gameId, direction });
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    console.log('Keyboard event listener added');
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [socket, gameStatus, gameId, playerNumber, gameState]);
 
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      console.log('Keyboard event listener removed');
-    };
-  }, [socket, gameStatus, gameId, playerNumber]);
+  // Handle game state updates with interpolation
+  useEffect(() => {
+    if (!socket) return;
 
-  // Handle canvas drawing
+    socket.on('gameState', (serverState) => {
+      const now = Date.now();
+      const latency = now - lastUpdateTime.current;
+      lastUpdateTime.current = now;
+
+      // Remove processed moves
+      pendingMoves.current = pendingMoves.current.filter(
+        move => move.timestamp > now - latency
+      );
+
+      // Interpolate between predicted and server state
+      const interpolatedState = interpolateStates(predictedState, serverState);
+      setGameState(interpolatedState);
+      setPredictedState(null);
+    });
+  }, [socket]);
+
+  // Interpolation function
+  const interpolateStates = (predicted, server) => {
+    if (!predicted) return server;
+
+    const alpha = 0.3; // Interpolation factor
+    const interpolated = { ...server };
+
+    // Interpolate paddle positions
+    interpolated.paddles.player1.y = 
+      predicted.paddles.player1.y * alpha + 
+      server.paddles.player1.y * (1 - alpha);
+    
+    interpolated.paddles.player2.y = 
+      predicted.paddles.player2.y * alpha + 
+      server.paddles.player2.y * (1 - alpha);
+
+    return interpolated;
+  };
+
+  // Update canvas drawing to use interpolated state
   useEffect(() => {
     if (!canvasRef.current || gameStatus !== 'playing') return;
 
@@ -156,17 +185,19 @@ const PongGame = () => {
     const ctx = canvas.getContext('2d');
 
     const drawGame = () => {
-      // Clear canvas
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+      // Use interpolated state for smooth rendering
+      const state = predictedState || gameState;
+      
       // Draw paddles
       ctx.fillStyle = '#fff';
-      const { player1, player2 } = gameState.paddles;
+      const { player1, player2 } = state.paddles;
       ctx.fillRect(player1.x, player1.y, player1.width, player1.height);
       ctx.fillRect(player2.x, player2.y, player2.width, player2.height);
 
       // Draw ball
-      const { ball } = gameState;
+      const { ball } = state;
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
       ctx.fill();
@@ -174,8 +205,8 @@ const PongGame = () => {
 
       // Draw score
       ctx.font = '48px Arial';
-      ctx.fillText(gameState.score.player1, canvas.width / 4, 50);
-      ctx.fillText(gameState.score.player2, 3 * canvas.width / 4, 50);
+      ctx.fillText(state.score.player1, canvas.width / 4, 50);
+      ctx.fillText(state.score.player2, 3 * canvas.width / 4, 50);
 
       // Draw middle line
       ctx.beginPath();
@@ -186,17 +217,12 @@ const PongGame = () => {
       ctx.stroke();
       ctx.closePath();
 
-      // Animation frame
       requestAnimationFrame(drawGame);
     };
 
-    // Start animation
     const animationId = requestAnimationFrame(drawGame);
-
-    return () => {
-      cancelAnimationFrame(animationId);
-    };
-  }, [gameState, gameStatus]);
+    return () => cancelAnimationFrame(animationId);
+  }, [gameState, predictedState, gameStatus]);
 
   // Handle find match button
   const handleFindMatch = () => {

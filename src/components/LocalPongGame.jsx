@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import io from 'socket.io-client';
 import { SERVER_URL } from '../config';
+import DebugPanel from './DebugPanel';
 
 const PongGame = ({ mode = 'local' }) => {
   const canvasRef = useRef(null);
@@ -45,6 +46,8 @@ const PongGame = ({ mode = 'local' }) => {
       height: 600
     }
   });
+
+  const [serverDebugInfo, setServerDebugInfo] = useState(null);
 
   // Initialize socket connection for multiplayer
   useEffect(() => {
@@ -108,6 +111,11 @@ const PongGame = ({ mode = 'local' }) => {
         setGameStarted(false);
         setGameId(null);
         setPlayerNumber(null);
+      });
+
+      // Add debug info listener
+      socketRef.current.on('debugUpdate', (debugInfo) => {
+        setServerDebugInfo(debugInfo);
       });
       
       return () => {
@@ -401,6 +409,9 @@ const PongGame = ({ mode = 'local' }) => {
           <p>Last Update: {debugInfo.timestamp}</p>
         </div>
       </div>
+
+      {/* Add DebugPanel */}
+      {mode === 'multiplayer' && <DebugPanel debugInfo={serverDebugInfo} />}
     </div>
   );
 };
